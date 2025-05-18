@@ -2,6 +2,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import numpy as np
 import pandas as pd
+import streamlit as st
 from sklearn.metrics import roc_curve, precision_recall_curve, auc
 from sklearn.inspection import permutation_importance
 import shap
@@ -16,6 +17,13 @@ class AttritionVisualizer:
         """
         self.model = model_instance
         plt.style.use('ggplot')
+
+    def ensure_string_columns(self, df):
+        """Ensure all DataFrame column names are strings to avoid Streamlit warnings"""
+        if not isinstance(df, pd.DataFrame):
+            return df
+        df.columns = df.columns.astype(str)
+        return df
         
     def set_plot_style(self):
         """Set consistent styling for all plots"""
@@ -76,6 +84,7 @@ class AttritionVisualizer:
         
         # Calculate correlation matrix
         corr = self.model.X.corr()
+        corr = self.ensure_string_columns(pd.DataFrame(corr))
         
         # Generate mask for the upper triangle
         mask = np.triu(np.ones_like(corr, dtype=bool))
@@ -105,6 +114,7 @@ class AttritionVisualizer:
         
         # Create a temporary dataframe with decoded categorical values
         temp_df = self.model.df.copy()
+        temp_df = self.ensure_string_columns(temp_df)
         temp_df['Attrition'] = temp_df['Attrition'].map({1: 'Yes', 0: 'No'})
         
         for i, feature in enumerate(categorical_features):
@@ -239,6 +249,7 @@ class AttritionVisualizer:
             comparison_data.append(model_metrics)
             
         comparison_df = pd.DataFrame(comparison_data)
+        comparison_df = self.ensure_string_columns(comparison_df)
         
         # Reshape for plotting
         comparison_plot_df = pd.melt(comparison_df, id_vars=['Model'], 
@@ -344,34 +355,195 @@ class AttritionVisualizer:
         plt.title(f'SHAP Feature Importance - {model_name}', fontsize=16)
         plt.tight_layout()
         plt.show()
-            
-    def plot_shap_dependence(self, model_name, feature_name):
+     
+
+     # visualization helper function
+
+    def show_shap_visualization(self, shap_data, viz_type="summary", feature=None, instance_idx=None):
         """
-        Plot SHAP dependence for a specific feature
+        Display various SHAP visualizations with improved compatibility.
         
         Args:
-            model_name: Name of the model
-            feature_name: Name of the feature to analyze
+            shap_data (dict): Dictionary containing SHAP values, sample data, and feature names
+            viz_type (str): Type of visualization ('summary', 'dependence', 'force')
+            feature (str, optional): Feature name for dependence plot
+            instance_idx (int, optional): Index of instance for force plot
+            
+        Returns:
+            matplotlib.figure.Figure: The generated figure
         """
-        shap_data = self.model.get_shap_values(model_name)
-            
+        import matplotlib.pyplot as plt
+        import shap
+        import numpy as np
+        
         if shap_data is None:
-            print(f"No SHAP values available for {model_name}")
-            return
+            return None
+
+        # Check for error in SHAP data
+        if 'error' in shap_data and shap_data['shap_values'] is None:
+            fig, ax = plt.subplots(figsize=(8, 4))
+            ax.text(0.5, 0.5, f"SHAP calculation failed: {shap_data['error']}", 
+                    ha='center', va='center', transform=ax.transAxes)
+            ax.axis('off')
+            return fig
+        
+        # Check if we have the newer SHAP Explanation object or older array format
+        is_new_api = hasattr(shap_data['shap_values'], 'values')
+        
+        if viz_type == "summary":
+            fig = plt.figure(figsize=(12, 10))
+            plt.clf()
             
-        if feature_name not in shap_data["feature_names"]:
-            print(f"Feature {feature_name} not found")
-            return
+            try:
+                # For newer SHAP API versions
+                if is_new_api:
+                    shap.summary_plot(
+                        shap_data['shap_values'], 
+                        shap_data['X_sample'],
+                        plot_size=(12, 10),
+                        show=False
+                    )
+                # For older SHAP versions
+                else:
+                    feature_names = [str(name) for name in shap_data['feature_names']]
+                    shap.summary_plot(
+                        shap_data['shap_values'], 
+                        shap_data['X_sample'].values,
+                        feature_names=feature_names,
+                        plot_size=(12, 10),
+                        show=False
+                    )
+                
+                return fig
+            except Exception as e:
+                plt.text(0.5, 0.5, f"Error with summary plot: {str(e)}", 
+                        ha='center', va='center', transform=plt.gca().transAxes)
+                return fig
+                
+        elif viz_type == "dependence":
+            if feature is None:
+                return None
+                
+            fig = plt.figure(figsize=(10, 6))
+            plt.clf()
             
-        shap_values = shap_data["shap_values"]
-        X_sample = shap_data["X_sample"]
+            try:
+                # First, find the feature index
+                if isinstance(shap_data['feature_names'], pd.Index):
+                    feature_idx = shap_data['feature_names'].get_loc(feature)
+                else:
+                    feature_idx = list(shap_data['feature_names']).index(feature)
+                
+                # For newer SHAP API with Explanation objects
+                if is_new_api:
+                    # Extract feature values and corresponding SHAP values
+                    feature_values = shap_data['X_sample'][feature].values
+                    shap_values_for_feature = shap_data['shap_values'].values[:, feature_idx]
+                    
+                    # Create custom dependence plot
+                    plt.scatter(feature_values, shap_values_for_feature, alpha=0.7)
+                    plt.xlabel(feature)
+                    plt.ylabel(f'SHAP value for {feature}')
+                    plt.title(f'SHAP Dependence Plot for {feature}')
+                    plt.grid(alpha=0.3)
+                # For older SHAP versions
+                else:
+                    shap.dependence_plot(
+                        feature_idx,
+                        shap_data['shap_values'],
+                        shap_data['X_sample'],
+                        feature_names=shap_data['feature_names'].tolist(),
+                        show=False
+                    )
+                    
+                return fig
+            except Exception as e:
+                plt.text(0.5, 0.5, f"Error with dependence plot: {str(e)}", 
+                        ha='center', va='center', transform=plt.gca().transAxes)
+                return fig
+                
+        elif viz_type == "force":
+            if instance_idx is None or not isinstance(instance_idx, int):
+                return None
+                
+            if instance_idx >= len(shap_data['X_sample']):
+                return None
+                    
+            fig = plt.figure(figsize=(10, 6))
+            plt.clf()
             
-        plt.figure(figsize=(12, 8))
-        shap.dependence_plot(feature_name, shap_values.values, X_sample, 
-                           feature_names=shap_data["feature_names"], show=False)
-        plt.title(f'SHAP Dependence Plot - {feature_name}', fontsize=16)
-        plt.tight_layout()
-        plt.show()
+            try:
+                # Get instance data
+                instance = shap_data['X_sample'].iloc[instance_idx]
+                feature_names = [str(name) for name in shap_data['feature_names']]
+                
+                # For newer SHAP API with Explanation objects
+                if is_new_api:
+                    # Get base value
+                    if hasattr(shap_data['shap_values'], 'base_values'):
+                        if isinstance(shap_data['shap_values'].base_values, np.ndarray):
+                            base_value = shap_data['shap_values'].base_values[instance_idx]
+                        else:
+                            base_value = shap_data['shap_values'].base_values
+                    else:
+                        base_value = shap_data['shap_values'].values.mean()
+                    
+                    # Get SHAP values for this instance
+                    instance_shap_values = shap_data['shap_values'].values[instance_idx]
+                    
+                    # Ensure instance_shap_values is 1D
+                    if len(instance_shap_values.shape) > 1 and instance_shap_values.shape[0] == 1:
+                        instance_shap_values = instance_shap_values[0]
+                    
+                    # Sort features by absolute SHAP value
+                    sorted_idx = np.argsort(np.abs(instance_shap_values))[-10:]  # Top 10 features
+                    
+                    # Format feature names with their values
+                    feature_names = []
+                    for i in sorted_idx:
+                        col_name = shap_data['feature_names'][i]
+                        if isinstance(instance, pd.Series):
+                            val = instance[col_name]
+                        else:
+                            val = instance.iloc[i]
+                        feature_names.append(f"{col_name} = {val:.2f}")
+                    
+                    # Create horizontal bar chart
+                    plt.barh(
+                        feature_names,
+                        instance_shap_values[sorted_idx],
+                        color=['red' if x > 0 else 'blue' for x in instance_shap_values[sorted_idx]]
+                    )
+                    plt.xlabel('SHAP Value (Impact on Prediction)')
+                    plt.title('Top Features Influencing This Prediction')
+                    
+                    # Add base value and prediction
+                    pred_value = base_value + instance_shap_values.sum()
+                    plt.figtext(0.05, 0.95, f'Base value: {base_value:.3f}')
+                    plt.figtext(0.05, 0.90, f'Prediction: {pred_value:.3f}')
+                    
+                # For older SHAP versions
+                else:
+                    # Create a simpler alternative view for compatibility
+                    if isinstance(shap_data['shap_values'], list):
+                        # Multi-class case, take class 1 (positive class)
+                        vals = shap_data['shap_values'][1][instance_idx] if len(shap_data['shap_values']) > 1 else shap_data['shap_values'][0][instance_idx]
+                    else:
+                        vals = shap_data['shap_values'][instance_idx]
+                    
+                    # Sort by magnitude
+                    sorted_idx = np.argsort(np.abs(vals))[-10:]
+                    feature_names = [str(shap_data['feature_names'][i]) for i in sorted_idx]
+                    plt.barh(feature_names, vals[sorted_idx])
+                    plt.title("SHAP Force Plot (Simplified)")
+                    
+                return fig
+            except Exception as e:
+                plt.text(0.5, 0.5, f"Error creating force plot: {str(e)}", 
+                        ha='center', va='center', transform=plt.gca().transAxes)
+                return fig
+        
+        return None
 
     # Class Imbalance Visualizations
     
