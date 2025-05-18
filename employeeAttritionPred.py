@@ -15,7 +15,7 @@ import shap
 
 class EmployeeAttritionModel:
     def __init__(self, data_path):
-        self.df = pd.read_csv(data_path)s
+        self.df = pd.read_csv(data_path)
 
         def ensure_string_columns(self, df):
             """Ensure all DataFrame column names are strings to avoid Streamlit warnings"""
